@@ -1,0 +1,18 @@
+{
+    "name": "示例营地",
+    "idx": 1,
+    "x": 0,
+    "y": 0,
+    "z": 0,
+    "data": [
+        { "prefab": "firepit", "name": "火堆", "x": 0, "y": 0, "z": 0, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "icebox", "name": "冰箱", "x": 4, "y": 0, "z": 0, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "treasurechest", "name": "箱子", "x": -4, "y": 0, "z": 0, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "cookpot", "name": "锅", "x": 0, "y": 0, "z": 4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "wall_wood", "name": "木墙", "x": -4, "y": 0, "z": -4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "wall_wood", "name": "木墙", "x": 0, "y": 0, "z": -4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "wall_wood", "name": "木墙", "x": 4, "y": 0, "z": -4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "wall_wood", "name": "木墙", "x": 4, "y": 0, "z": 4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" },
+        { "prefab": "wall_wood", "name": "木墙", "x": -4, "y": 0, "z": 4, "rotation": 0, "scale": [1, 1, 1], "layer": 6, "build": "" }
+    ]
+}
