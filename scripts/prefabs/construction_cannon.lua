@@ -3,7 +3,6 @@
 local assets =
 {
     Asset("ANIM", "anim/boat_cannon.zip"),
-    Asset("ANIM", "anim/ui_chest_3x3.zip"),
 }
 
 local prefabs =
@@ -60,6 +59,8 @@ local function fn()
     -- 网络同步变量(必须在 SetPristine 之前添加; vanilla 惯例传 inst.GUID)
     inst.net_state = net_byte(inst.GUID, "ccbp.state")
     inst.net_uid = net_string(inst.GUID, "ccbp.uid")
+    inst.net_mats = net_string(inst.GUID, "ccbp.mats", "ccbpmatsdirty")
+    inst.net_ready = net_bool(inst.GUID, "ccbp.ready", "ccbpreadydirty")
     inst.fire_x = net_float(inst.GUID, "ccbp.firex")
     inst.fire_z = net_float(inst.GUID, "ccbp.firez")
     inst.fire_seq = net_ushortint(inst.GUID, "ccbp.fireseq", "ccbpfire")

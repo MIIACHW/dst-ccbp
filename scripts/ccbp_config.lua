@@ -13,7 +13,7 @@ local CCBP = {
     -- 施工参数(可被 mod 选项覆盖)
     BUILD_INTERVAL = 1.5,  -- 每发炮弹间隔(秒)
     CANNON_RANGE = 60,     -- 投影中心与大炮的最大距离
-    MATERIAL_RADIUS = 6,   -- 自动取料半径(0=仅大炮货舱)
+    MATERIAL_RADIUS = 6,   -- 自动取料半径(读取周围容器, 0=仅大炮货槽)
     FLIGHT_TIME = 0.9,     -- 炮弹飞行时间(秒), 服务器延时后落地生成建筑
     MAX_STEPS_PER_TICK = 20,
 
@@ -27,7 +27,9 @@ local CCBP = {
     DATA_CHUNKS_PER_TICK = 4,
 
     -- 客户端放置状态机
-    MODE = { INACTIVE = 0, LOADING = 1, PLACING = 2, CONFIRMING = 3 },
+    -- HOLDING = 蓝图在手上(投影固定, 右键移到新位置并确认)
+    -- PLACED  = 蓝图已放回背包(投影固定保留)
+    MODE = { INACTIVE = 0, LOADING = 1, HOLDING = 2, PLACED = 3 },
 
     -- 施工队列状态(与规格一致, 同步为 net byte)
     STATE = {

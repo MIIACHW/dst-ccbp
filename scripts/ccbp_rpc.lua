@@ -89,47 +89,64 @@ function RPC.BurnBlueprint(player, id)
     NetData.SendToast(player, "刻录成功: " .. bp.name)
 end
 
--- 最终确认施工: blueprint_id + origin + rotation + target cannon
-function RPC.ConfirmConstruction(player, id, ox, oz, q, uid)
-    print("[CCBP] 服务器收到施工确认: id=" .. tostring(id) .. " q=" .. tostring(q) .. " uid=" .. tostring(uid))
-    if not (isstr(id) and isnum(ox) and isnum(oz) and isnum(q) and isstr(uid)) then
-        print("[CCBP] 施工确认被拒: 参数类型非法")
+-- 手持蓝图右键: 确认投影位置(记录到蓝图物品上, 并把蓝图放回背包)
+function RPC.PlaceBlueprint(player, id, ox, oz, q)
+    if not (isstr(id) and isnum(ox) and isnum(oz) and isnum(q)) then
         return
     end
     q = math.floor(q) % 4
     if math.abs(ox) > 10000 or math.abs(oz) > 10000 then
         return
     end
-
     local store = GetStore()
     local bp = store ~= nil and store:Get(id) or nil
     if bp == nil then
-        SayTo(player, "蓝图数据不存在或未加载")
+        SayTo(player, "蓝图数据不存在")
         return
     end
 
+    -- 在玩家物品中找到这张蓝图(手持或背包)
+    local inv = player.components.inventory
+    local target = nil
+    if inv ~= nil then
+        if inv.activeitem ~= nil and inv.activeitem.components.construction_blueprint ~= nil
+            and inv.activeitem.components.construction_blueprint:GetID() == id then
+            target = inv.activeitem
+        end
+        if target == nil and inv.itemslots ~= nil then
+            for _, it in pairs(inv.itemslots) do
+                if it ~= nil and it.components ~= nil and it.components.construction_blueprint ~= nil
+                    and it.components.construction_blueprint:GetID() == id then
+                    target = it
+                    break
+                end
+            end
+        end
+    end
+    if target == nil or target.components.construction_blueprint == nil then
+        SayTo(player, "找不到蓝图物品")
+        return
+    end
+
+    target.components.construction_blueprint:SetPlacement(ox, oz, q)
+    if inv ~= nil and inv.ReturnActiveItem ~= nil then
+        inv:ReturnActiveItem()
+    end
+    NetData.SendToast(player, "投影位置已确认, 蓝图已放回背包\n放入大炮蓝图槽后点[开始施工]")
+end
+
+-- 大炮[开始施工]: 读取蓝图槽中已确认投影的蓝图并开始施工
+function RPC.StartConstruction(player, uid)
+    if not isstr(uid) then
+        return
+    end
     local cc = GetCannonByUID(uid)
     if cc == nil or cc.inst == nil or not cc.inst:IsValid() then
         SayTo(player, "找不到目标建筑大炮")
         return
     end
-
-    -- 重新验证: 投影中心必须在大炮施工范围内
-    local cx, cy, cz = cc.inst.Transform:GetWorldPosition()
-    local dx, dz = ox - cx, oz - cz
-    local maxr = CCBP.CANNON_RANGE + 5
-    if dx * dx + dz * dz > maxr * maxr then
-        SayTo(player, "投影位置离大炮太远")
-        return
-    end
-
-    local steps = TransformCC.ComputeSteps(bp, ox, oz, q)
-    local ok, msg = cc:Enqueue(steps, bp.name)
-    if ok then
-        SayTo(player, "已加入施工队列: " .. bp.name .. " (" .. #steps .. "个结构)")
-    else
-        SayTo(player, msg)
-    end
+    local ok, msg = cc:TryStartFromBlueprint()
+    SayTo(player, msg)
 end
 
 function RPC.CancelConstruction(player, uid)

@@ -7,36 +7,6 @@ local Actions = {}
 
 -- ========== 服务器端 Action 处理 ==========
 
-local function GetHeldBlueprint(act)
-    local item = act.invobject
-    if item == nil or item.components.construction_blueprint == nil then
-        return nil
-    end
-    if item.components.inventoryitem == nil or not item.components.inventoryitem:IsHeld() then
-        return nil
-    end
-    return item
-end
-
--- 拿起蓝图 → 放置投影(通知持有者的客户端进入放置模式)
-Actions.OnPlace = function(act)
-    if act == nil or act.doer == nil then
-        return false
-    end
-    local item = GetHeldBlueprint(act)
-    if item == nil then
-        return false
-    end
-    local id = item.components.construction_blueprint:GetID()
-    if id == nil then
-        return false
-    end
-    if TheWorld.ismastersim then
-        NetData.SendStartPlacement(act.doer, id)
-    end
-    return true
-end
-
 -- 右键大炮 → 打开蓝图库
 Actions.OnBrowse = function(act)
     print("[CCBP] 服务器收到打开蓝图库动作")
@@ -76,14 +46,6 @@ Actions.SceneCannon = function(inst, doer, actions, right)
         table.insert(actions, ACTIONS.CCBP_CANCEL)
     end
     table.insert(actions, ACTIONS.CCBP_BROWSE)
-end
-
--- 蓝图物品在背包中(右键): 放置投影
-Actions.InventoryBlueprint = function(inst, doer, actions, right)
-    if not right or not inst:HasTag("ccbp_blueprint") then
-        return
-    end
-    table.insert(actions, ACTIONS.CCBP_PLACE)
 end
 
 return Actions

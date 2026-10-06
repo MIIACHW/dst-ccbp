@@ -1,18 +1,18 @@
--- 客户端放置/确认状态机
--- LOADING: 等服务器下发蓝图数据
--- PLACING: 投影跟随鼠标, 右键确认位置(玩家可正常移动)
--- CONFIRMING: 玩家锁定(拦截输入), WASD 微调 + Q/E 旋转(参考DST摄像机方向), 右键最终确认
+-- 客户端放置系统(固定标记式):
+--   拿起蓝图 → 投影出现在"上一次确认的位置"(固定不动, 不跟随鼠标)
+--   右键 = 把投影移动到当前鼠标位置并确认(在此之前投影绝不移动)
+--   Q/E = 原地旋转(即时同步服务器), ESC = 收起投影
+--   蓝图放回背包 → 投影保持固定; 放入大炮蓝图槽 → [开始施工]
 local CCBP = require "ccbp_config"
 local TransformCC = require "ccbp_transform"
 local Ghosts = require "ccbp_ghosts"
 local UI = require "ccbp_uiscreens"
 
-local KEY_SHIFT_SAFE = KEY_SHIFT or 304
-
 local Placement = {
-    mode = CCBP.MODE.INACTIVE,
+    mode = CCBP.MODE.INACTIVE, -- INACTIVE / LOADING / HOLDING / PLACED
     id = nil,
-    bp = nil,
+    bp = nil,                   -- 蓝图数据缓存(避免重复拉取)
+    active_item = nil,          -- 手上的蓝图物品(客户端replica)
     ox = 0,
     oz = 0,
     q = 0,
@@ -22,24 +22,11 @@ local Placement = {
     prev_e = false,
     load_tried = 0,
     deadline = 0,
-    target_uid = nil,
-    target_scan = 0,
+    cool_until = 0,
     task = nil,
 }
 
--- 确认模式下拦截的输入(经 modmain 的 playercontroller.OnControl 包装生效)
-local BlockedAll = {
-    [CONTROL_PRIMARY] = true,
-    [CONTROL_SECONDARY] = true,
-    [CONTROL_ATTACK] = true,
-    [CONTROL_ACTION] = true,
-    [CONTROL_INSPECT] = true,
-    [CONTROL_MOVE_UP] = true,
-    [CONTROL_MOVE_DOWN] = true,
-    [CONTROL_MOVE_LEFT] = true,
-    [CONTROL_MOVE_RIGHT] = true,
-}
--- 放置模式只拦右键(防止误触发右键动作), 移动不受限制
+-- 手持蓝图期间拦截右键(右键由本模块处理为"移动投影到鼠标位置并确认")
 local BlockedSecondary = { [CONTROL_SECONDARY] = true }
 
 function Placement.IsActive()
@@ -48,58 +35,64 @@ end
 
 -- 由 modmain 的 AddComponentPostInit("playercontroller") 调用
 function Placement.IsControlBlocked(control)
-    if Placement.mode == CCBP.MODE.CONFIRMING then
-        return BlockedAll[control] == true
-    elseif Placement.mode == CCBP.MODE.PLACING then
+    if Placement.mode == CCBP.MODE.HOLDING or Placement.mode == CCBP.MODE.LOADING then
         return BlockedSecondary[control] == true
     end
     return false
 end
 
-function Placement.OnStartPlacement(id)
-    if type(id) == "string" then
-        Placement.Start(id)
-    end
-end
-
-function Placement.Start(id)
-    print("[CCBP] 客户端开始放置蓝图: " .. tostring(id))
+-- 拿起蓝图: 优先用缓存数据, 否则向服务器拉取
+function Placement.Start(id, active_item)
     if Placement.IsActive() then
         Placement.Exit()
     end
-    Placement.mode = CCBP.MODE.LOADING
     Placement.id = id
-    Placement.bp = nil
+    Placement.active_item = active_item
+    if Placement.bp ~= nil and Placement.bp.id == id then
+        Placement.EnterHold()
+        return
+    end
+    Placement.mode = CCBP.MODE.LOADING
     Placement.load_tried = 0
     Placement.deadline = GetTime() + CCBP.LOAD_TIMEOUT
     SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "RequestBlueprintData"), id)
-    UI.Toast("正在读取蓝图数据…")
+    UI.Toast("手持蓝图: 右键把投影固定到鼠标位置")
     if Placement.task == nil and ThePlayer ~= nil then
         Placement.task = ThePlayer:DoPeriodicTask(FRAMES, Placement.Update)
     end
 end
 
--- 服务器蓝图数据下发完成(由 ccbp_netdata 回调)
-function Placement.OnBlueprintData(bp)
-    print("[CCBP] 客户端收到蓝图数据: " .. tostring(bp ~= nil and bp.name or "nil"))
-    if Placement.mode == CCBP.MODE.INACTIVE or bp == nil then
-        return
-    end
-    Placement.bp = bp
+-- 投影出现: 固定在"上一次确认的位置"(netvar 同步), 没有则当前鼠标位置
+function Placement.EnterHold()
+    Placement.mode = CCBP.MODE.HOLDING
     local pos = TheInput:GetWorldPosition()
     Placement.ox = TransformCC.Snap(pos ~= nil and pos.x or 0, CCBP.SNAP)
     Placement.oz = TransformCC.Snap(pos ~= nil and pos.z or 0, CCBP.SNAP)
     Placement.q = 0
-    local ok_n, failed = Ghosts.SpawnFor(bp)
+    local item = Placement.active_item
+    if item ~= nil and item.net_plc ~= nil and item.net_plc:value() then
+        Placement.ox = item.net_plcx:value()
+        Placement.oz = item.net_plcz:value()
+        Placement.q = item.net_plcq:value() % 4
+    end
+    local ok_n, failed = Ghosts.SpawnFor(Placement.bp)
     Ghosts.Apply(Placement.ox, Placement.oz, Placement.q, true)
-    Placement.mode = CCBP.MODE.PLACING
     Placement.prev_secondary = TheInput:IsControlPressed(CONTROL_SECONDARY)
     Placement.prev_escape = TheInput:IsKeyDown(KEY_ESCAPE)
-    if failed > 0 then
-        UI.Toast(string.format("蓝图已就绪: %d个结构, %d个无法预览", ok_n, failed))
-    else
-        UI.Toast("蓝图已就绪: " .. bp.name .. " · 移动鼠标放置, 右键确认位置")
+    Placement.prev_q = false
+    Placement.prev_e = false
+    if failed ~= nil and failed > 0 then
+        UI.Toast(string.format("蓝图就绪: %d个结构, %d个无法预览", ok_n, failed))
     end
+end
+
+-- 服务器蓝图数据下发完成(由 ccbp_netdata 回调)
+function Placement.OnBlueprintData(bp)
+    if Placement.mode ~= CCBP.MODE.LOADING or bp == nil then
+        return
+    end
+    Placement.bp = bp
+    Placement.EnterHold()
 end
 
 function Placement.SetRotation(q)
@@ -107,100 +100,46 @@ function Placement.SetRotation(q)
     if q ~= Placement.q then
         Placement.q = q
         Ghosts.Apply(Placement.ox, Placement.oz, Placement.q, true)
-        UI.SetConfirmInfo(Placement:ConfirmInfoText())
+        -- 原地旋转即时同步服务器, 保证投影显示与服务器记录一致
+        SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "PlaceBlueprint"),
+            Placement.id, Placement.ox, Placement.oz, Placement.q)
+        UI.Toast("朝向 " .. (Placement.q % 4) * 90 .. "°")
     end
 end
 
-function Placement:ConfirmInfoText()
-    local n = Placement.bp ~= nil and #Placement.bp.structures or 0
-    local target = "附近没有建筑大炮!"
-    if Placement.target_uid ~= nil then
-        target = "目标: 附近建筑大炮"
+-- 右键: 投影移动到当前鼠标位置并确认(固定)
+function Placement.MoveAndConfirm()
+    local pos = TheInput:GetWorldPosition()
+    if pos ~= nil then
+        Placement.ox = TransformCC.Snap(pos.x, CCBP.SNAP)
+        Placement.oz = TransformCC.Snap(pos.z, CCBP.SNAP)
     end
-    return string.format("%s · %d个结构 · 朝向 %d°\n%s",
-        Placement.bp.name or "?", n, (Placement.q % 4) * 90, target)
-end
-
-function Placement:ScanTarget()
-    local ents = TheSim:FindEntities(Placement.ox, 0, Placement.oz, CCBP.CANNON_RANGE, { "construction_cannon" })
-    local best, bestd = nil, math.huge
-    for _, ent in ipairs(ents) do
-        if ent:IsValid() and ent.net_uid ~= nil then
-            local x, y, z = ent.Transform:GetWorldPosition()
-            local d = (x - Placement.ox) * (x - Placement.ox) + (z - Placement.oz) * (z - Placement.oz)
-            if d < bestd then
-                best = ent
-                bestd = d
-            end
-        end
-    end
-    Placement.target_uid = best ~= nil and best.net_uid:value() or nil
-end
-
-function Placement.EnterConfirm()
-    Placement.mode = CCBP.MODE.CONFIRMING
-    Placement.prev_secondary = true -- 刚按下的这次右键不算下一次确认
-    Placement.prev_escape = TheInput:IsKeyDown(KEY_ESCAPE)
-    Placement.prev_q = false
-    Placement.prev_e = false
-    Placement.target_scan = 0
-    -- 锁定玩家: 输入在 OnControl 拦截层被吞掉, 这里停掉正在进行的移动
-    local player = ThePlayer
-    if player ~= nil and player.components ~= nil then
-        pcall(function()
-            if player.components.locomotor ~= nil then
-                player.components.locomotor:Stop()
-            end
-        end)
-    end
-    Placement:ScanTarget()
-    UI.ShowConfirm(Placement.bp, Placement:ConfirmInfoText())
-end
-
-function Placement.SendConfirm()
-    if Placement.target_uid == nil then
-        UI.Toast("附近没有建筑大炮, 无法施工")
-        return
-    end
-    SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "ConfirmConstruction"),
-        Placement.id, Placement.ox, Placement.oz, Placement.q, Placement.target_uid)
-    UI.Toast("已提交施工请求")
-    Placement.Exit()
+    Ghosts.Apply(Placement.ox, Placement.oz, Placement.q, false)
+    SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "PlaceBlueprint"),
+        Placement.id, Placement.ox, Placement.oz, Placement.q)
+    UI.Toast("投影已固定在此位置")
 end
 
 function Placement.Exit()
     Placement.mode = CCBP.MODE.INACTIVE
     Placement.bp = nil
     Placement.id = nil
-    Placement.target_uid = nil
+    Placement.active_item = nil
     if Placement.task ~= nil then
         Placement.task:Cancel()
         Placement.task = nil
     end
     Ghosts.Clear()
-    UI.HideConfirm()
 end
 
-function Placement.Update()    local player = ThePlayer
+function Placement.Update()
+    local player = ThePlayer
     if player == nil or not player:IsValid() then
         Placement.Exit()
         return
     end
 
     if Placement.mode == CCBP.MODE.LOADING then
-        if GetTime() > Placement.deadline then
-            Placement.load_tried = Placement.load_tried + 1
-            if Placement.load_tried > 1 then
-                UI.Toast("读取蓝图数据超时")
-                Placement.Exit()
-            else
-                Placement.deadline = GetTime() + CCBP.LOAD_TIMEOUT
-                SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "RequestBlueprintData"), Placement.id)
-            end
-        end
-
-    elseif Placement.mode == CCBP.MODE.PLACING then
-        -- ESC 取消
         local esc = TheInput:IsKeyDown(KEY_ESCAPE)
         if esc and not Placement.prev_escape then
             Placement.Exit()
@@ -208,41 +147,28 @@ function Placement.Update()    local player = ThePlayer
         end
         Placement.prev_escape = esc
 
-        -- 投影跟随鼠标
-        local pos = TheInput:GetWorldPosition()
-        if pos ~= nil then
-            local nx = TransformCC.Snap(pos.x, CCBP.SNAP)
-            local nz = TransformCC.Snap(pos.z, CCBP.SNAP)
-            if nx ~= Placement.ox or nz ~= Placement.oz then
-                Placement.ox, Placement.oz = nx, nz
-                Ghosts.Apply(Placement.ox, Placement.oz, Placement.q, false)
+        if GetTime() > Placement.deadline then
+            Placement.load_tried = Placement.load_tried + 1
+            if Placement.load_tried > 1 then
+                UI.Toast("读取蓝图数据失败, 请重新拿起蓝图")
+                Placement.cool_until = GetTime() + 5
+                Placement.Exit()
+            else
+                Placement.deadline = GetTime() + CCBP.LOAD_TIMEOUT
+                SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "RequestBlueprintData"), Placement.id)
             end
         end
 
-        -- 右键确认位置 → 进入微调模式
-        local sec = TheInput:IsControlPressed(CONTROL_SECONDARY)
-        if sec and not Placement.prev_secondary then
-            Placement.EnterConfirm()
+    elseif Placement.mode == CCBP.MODE.HOLDING then
+        -- ESC 收起投影
+        local esc = TheInput:IsKeyDown(KEY_ESCAPE)
+        if esc and not Placement.prev_escape then
+            Placement.Exit()
             return
         end
-        Placement.prev_secondary = sec
+        Placement.prev_escape = esc
 
-    elseif Placement.mode == CCBP.MODE.CONFIRMING then
-        -- WASD 微调(摄像机相对方向)
-        local dx = (TheInput:IsKeyDown(KEY_D) and 1 or 0) - (TheInput:IsKeyDown(KEY_A) and 1 or 0)
-        local dy = (TheInput:IsKeyDown(KEY_W) and 1 or 0) - (TheInput:IsKeyDown(KEY_S) and 1 or 0)
-        if dx ~= 0 or dy ~= 0 then
-            local rv = TheCamera:GetRightVec()
-            local dv = TheCamera:GetDownVec()
-            -- 与 playercontroller 相同的换算: dir = 右向量*x - 下向量*y
-            local dir = (rv * dx - dv * dy):GetNormalized()
-            local spd = TheInput:IsKeyDown(KEY_SHIFT_SAFE) and CCBP.CONFIRM_SPEED_SLOW or CCBP.CONFIRM_SPEED
-            Placement.ox = TransformCC.Snap(Placement.ox + dir.x * spd * FRAMES, 0.25)
-            Placement.oz = TransformCC.Snap(Placement.oz + dir.z * spd * FRAMES, 0.25)
-            Ghosts.Apply(Placement.ox, Placement.oz, Placement.q, false)
-        end
-
-        -- Q/E 旋转(绕蓝图原点)
+        -- Q/E 原地旋转(即时同步)
         local qk = TheInput:IsKeyDown(KEY_Q)
         if qk and not Placement.prev_q then
             Placement.SetRotation(Placement.q - 1)
@@ -254,22 +180,15 @@ function Placement.Update()    local player = ThePlayer
         end
         Placement.prev_e = ek
 
-        -- 定期重新扫描目标大炮
-        Placement.target_scan = Placement.target_scan - FRAMES
-        if Placement.target_scan <= 0 then
-            Placement.target_scan = 0.5
-            Placement:ScanTarget()
-            UI.SetConfirmInfo(Placement:ConfirmInfoText())
-        end
-
-        -- 右键最终确认 / ESC 取消
+        -- 右键 = 投影移动到鼠标位置并固定
         local sec = TheInput:IsControlPressed(CONTROL_SECONDARY)
         if sec and not Placement.prev_secondary then
-            Placement.SendConfirm()
-            return
+            Placement.MoveAndConfirm()
         end
         Placement.prev_secondary = sec
 
+    elseif Placement.mode == CCBP.MODE.PLACED then
+        -- 投影固定保留(蓝图在背包/大炮里): ESC 收起
         local esc = TheInput:IsKeyDown(KEY_ESCAPE)
         if esc and not Placement.prev_escape then
             Placement.Exit()
@@ -279,31 +198,43 @@ function Placement.Update()    local player = ThePlayer
     end
 end
 
--- ==================== B键快捷键: 直接打开蓝图库 ====================
--- 客户端本地直开, 绕开右键动作链路; 同时输出大炮的诊断信息
-
-local KEY_B_SAFE = KEY_B or 98
-
-local function FindNearestCannon()
-    local player = ThePlayer
-    if player == nil then
-        return nil
+-- 手持蓝图监视(由 modmain 的 AddPlayerPostInit 每帧调用, 只对本地玩家生效):
+--   拿起蓝图 → 显示投影(HOLDING); 放回背包 → 投影保持固定(PLACED)
+function Placement.WatchActiveItem(inst)
+    if inst ~= ThePlayer then
+        return
     end
-    local x, y, z = player.Transform:GetWorldPosition()
-    local ents = TheSim:FindEntities(x, y, z, 40, { "construction_cannon" })
-    local best, bestd = nil, math.huge
-    for _, ent in ipairs(ents) do
-        if ent:IsValid() then
-            local ex, ey, ez = ent.Transform:GetWorldPosition()
-            local d = (ex - x) * (ex - x) + (ez - z) * (ez - z)
-            if d < bestd then
-                best = ent
-                bestd = d
+    local inv = inst.replica ~= nil and inst.replica.inventory or nil
+    local active = (inv ~= nil and inv.GetActiveItem ~= nil) and inv:GetActiveItem() or nil
+    local isbp = active ~= nil and active:HasTag("ccbp_blueprint")
+        and active.net_bpid ~= nil and active.net_bpid:value() ~= ""
+
+    if isbp then
+        local id = active.net_bpid:value()
+        if Placement.mode == CCBP.MODE.INACTIVE then
+            if GetTime() >= Placement.cool_until then
+                Placement.Start(id, active)
             end
+        elseif Placement.mode == CCBP.MODE.PLACED and Placement.active_item ~= active then
+            -- 重新拿起(上次是放回背包): 投影回到手上(仍然固定)
+            Placement.active_item = active
+            Placement.mode = CCBP.MODE.HOLDING
+            Placement.prev_secondary = TheInput:IsControlPressed(CONTROL_SECONDARY)
+            Placement.prev_escape = TheInput:IsKeyDown(KEY_ESCAPE)
+        end
+    else
+        if Placement.mode == CCBP.MODE.HOLDING then
+            -- 放回背包/放下: 投影保持固定
+            Placement.mode = CCBP.MODE.PLACED
+            Placement.active_item = nil
+        elseif Placement.mode == CCBP.MODE.LOADING then
+            Placement.Exit()
         end
     end
-    return best
 end
+
+-- ==================== B键快捷键: 直接打开蓝图库 ====================
+local KEY_B_SAFE = KEY_B or 98
 
 local function OnBrowseKey()
     if Placement.IsActive() then
@@ -313,19 +244,7 @@ local function OnBrowseKey()
     if screen ~= nil and screen.name ~= nil and screen.name ~= "HUD" then
         return -- 有界面打开时忽略(避免打断文本输入)
     end
-    local cannon = FindNearestCannon()
-    local uid = ""
-    if cannon ~= nil then
-        uid = cannon.net_uid ~= nil and cannon.net_uid:value() or ""
-        print(string.format(
-            "[CCBP][诊断] B键: 找到大炮 uid=%s inherent动作=%s mod动作同步=%s",
-            tostring(uid),
-            tostring(cannon.inherentscenealtaction ~= nil),
-            tostring(cannon.modactioncomponents ~= nil and cannon.modactioncomponents["dps"] ~= nil)))
-    else
-        print("[CCBP][诊断] B键: 附近40单位内没有大炮, 以无目标模式打开")
-    end
-    UI.OnOpenBrowser(uid, STRINGS.NAMES.CONSTRUCTION_CANNON or "建筑大炮")
+    UI.OnOpenBrowser("", STRINGS.NAMES.CONSTRUCTION_CANNON or "建筑大炮")
 end
 
 if not TheNet:IsDedicated() then

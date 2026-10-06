@@ -2,6 +2,7 @@
 -- 状态: IDLE / CHECKING / WAITING_MATERIAL / BUILDING / COMPLETED / ERROR
 -- 服务器只在开炮瞬间设置网络变量, 炮弹飞行由客户端本地特效表现, 落地生成由服务器延时执行
 local CCBP = require "ccbp_config"
+local TransformCC = require "ccbp_transform"
 
 -- 大炮实例注册表(按uid): 必须是独立的文件级 local——
 -- 构造函数闭包在 local ConstructionCannon 声明完成前编译, 闭包里引用不到类本身(strict.lua 会报未声明全局)
@@ -20,6 +21,13 @@ local ConstructionCannon = Class(function(self, inst)
     ByUID[self.uid] = self
     self.inst:ListenForEvent("onremove", function()
         ByUID[self.uid] = nil
+    end)
+    -- 蓝图槽变化(第一格放入/取出蓝图) → 更新就绪状态
+    self.inst:ListenForEvent("itemget", function()
+        self:RefreshBlueprintSlot()
+    end)
+    self.inst:ListenForEvent("itemlose", function()
+        self:RefreshBlueprintSlot()
     end)
 end)
 
@@ -44,6 +52,105 @@ end
 function ConstructionCannon:Say(msg)
     if self.inst.components.talker ~= nil then
         self.inst.components.talker:Say(msg)
+    end
+end
+
+-- 蓝图槽(第一格)状态: 放入"已确认投影位置"的蓝图后 net_ready=true
+function ConstructionCannon:RefreshBlueprintSlot()
+    local bp = nil
+    local container = self.inst.components.container
+    if container ~= nil and container.slots ~= nil then
+        bp = container.slots[1]
+    end
+    local ready = false
+    if bp ~= nil and bp:IsValid() and bp.components.construction_blueprint ~= nil then
+        self.blueprint_item = bp
+        self.blueprint_placement = bp.components.construction_blueprint:GetPlacement()
+        ready = (self.blueprint_placement ~= nil)
+    else
+        self.blueprint_item = nil
+        self.blueprint_placement = nil
+    end
+    if self.inst.net_ready ~= nil then
+        self.inst.net_ready:set(ready)
+    end
+    if self.job == nil then
+        self:UpdateMatsText()
+    end
+end
+
+-- [开始施工]: 从蓝图槽中的蓝图读取已确认的投影位置并开始施工
+function ConstructionCannon:TryStartFromBlueprint()
+    if self.job ~= nil then
+        return false, "大炮正在施工中"
+    end
+    self:RefreshBlueprintSlot()
+    local bpitem = self.blueprint_item
+    local placement = self.blueprint_placement
+    if bpitem == nil or placement == nil then
+        return false, "蓝图槽中没有已确认投影位置的蓝图"
+    end
+    local id = bpitem.components.construction_blueprint:GetID()
+    local store = TheWorld ~= nil and TheWorld.components.ccbp_store or nil
+    local bp = store ~= nil and store:Get(id) or nil
+    if bp == nil then
+        return false, "蓝图数据不存在或未加载"
+    end
+    local cx, cy, cz = self.inst.Transform:GetWorldPosition()
+    local dx, dz = placement.x - cx, placement.z - cz
+    local maxr = CCBP.CANNON_RANGE + 5
+    if dx * dx + dz * dz > maxr * maxr then
+        return false, "投影位置离大炮太远"
+    end
+    local steps = TransformCC.ComputeSteps(bp, placement.x, placement.z, placement.q)
+    local ok, msg = self:Enqueue(steps, bp.name)
+    return ok, msg
+end
+
+-- 更新货槽界面的"所需材料"面板(net_string 同步给客户端)
+-- 施工不按蓝图顺序: 哪个建筑材料齐备就先造哪个
+function ConstructionCannon:UpdateMatsText()
+    local txt = ""
+    if self.job ~= nil then
+        local total = #self.job.steps
+        local done = math.min(total - (self.job.remaining or 0), total)
+        local head
+        if self.state == "WAITING_MATERIAL" then
+            head = string.format("等待材料… (%d/%d)", done, total)
+        elseif self.state == "BUILDING" or self.state == "CHECKING" then
+            head = string.format("施工中 %d/%d", done, total)
+        else
+            head = "准备施工"
+        end
+        txt = head
+        if self.state == "WAITING_MATERIAL" then
+            local parts = AggregateMissing(self)
+            if #parts > 0 then
+                local shown = {}
+                for i, p in ipairs(parts) do
+                    if i > 6 then
+                        table.insert(shown, "…")
+                        break
+                    end
+                    table.insert(shown, p)
+                end
+                txt = txt .. "\n还缺: " .. table.concat(shown, ", ")
+            end
+        end
+        if self.job.mats_lines ~= nil and #self.job.mats_lines > 0 then
+            txt = txt .. "\n----------\n整单所需:\n" .. table.concat(self.job.mats_lines, "\n")
+        end
+    elseif self.blueprint_placement ~= nil then
+        txt = "蓝图已就绪\n点击[开始施工]"
+    else
+        txt = "放入蓝图开始施工"
+    end
+    -- net_string 容量保护
+    if #txt > 400 then
+        txt = string.sub(txt, 1, 397) .. "…"
+    end
+    if self.inst.net_mats ~= nil then
+        self.inst.net_mats:set(txt)
     end
 end
 
@@ -157,10 +264,21 @@ local function ComputeNeeds(self, s)
     return needs, updates
 end
 
+-- 可用材料计数(带每 tick 缓存: BuildingTick 开始时清空, 同一 tick 内不重复扫描容器)
 local function AvailableCount(self, item_type)
+    local cache = self._avail_cache
+    if cache ~= nil then
+        local c = cache[item_type]
+        if c ~= nil then
+            return c
+        end
+    end
     local n = 0
     for _, container in ipairs(IterContainers(self.inst)) do
         n = n + CountInContainer(container, item_type)
+    end
+    if cache ~= nil then
+        cache[item_type] = n
     end
     return n
 end
@@ -201,27 +319,31 @@ function ConstructionCannon:TakeMaterials(s)
     return true
 end
 
-local function MissingText(self)
-    local s = self.job ~= nil and self.job.steps[self.job.next] or nil
-    if s == nil then
-        return ""
-    end
-    local recipe, per = ResolveRecipe(s.prefab)
-    if recipe == nil then
-        return ""
-    end
-    local parts = {}
-    for _, ing in ipairs(recipe.ingredients) do
-        if ing ~= nil and ing.type ~= nil and (ing.amount or 0) > 0 then
-            local need = math.ceil(ing.amount / per)
-            local have = AvailableCount(self, ing.type)
-            if have < need then
-                local label = STRINGS.NAMES[string.upper(ing.type)] or ing.type
-                parts[#parts + 1] = label .. "x" .. (need - have)
+-- 汇总所有未完成步骤还缺的材料(面板/播报用), 返回排序后的 {label xN} 数组
+local function AggregateMissing(self)
+    local totals = {}
+    for i, s in ipairs(self.job.steps) do
+        if self.job.pending[i] then
+            local recipe, per = ResolveRecipe(s.prefab)
+            if recipe ~= nil then
+                for _, ing in ipairs(recipe.ingredients) do
+                    if ing ~= nil and ing.type ~= nil and (ing.amount or 0) > 0 then
+                        totals[ing.type] = (totals[ing.type] or 0) + ing.amount / per
+                    end
+                end
             end
         end
     end
-    return table.concat(parts, ", ")
+    local parts = {}
+    for t, amt in pairs(totals) do
+        local lack = math.ceil(amt - AvailableCount(self, t) - 0.000001)
+        if lack > 0 then
+            local label = STRINGS.NAMES[string.upper(t)] or t
+            parts[#parts + 1] = label .. " x" .. lack
+        end
+    end
+    table.sort(parts)
+    return parts
 end
 
 -- ==================== 步骤校验与执行 ====================
@@ -259,6 +381,7 @@ end
 
 -- 开炮: 服务器只做一次动画/音效/网络变量设置(不逐帧移动炮弹)
 function ConstructionCannon:Fire(s)
+    print(string.format("[CCBP] 开炮: %s @ (%.1f, %.1f)", s.prefab, s.x, s.z))
     local inst = self.inst
     inst.AnimState:PlayAnimation("shoot")
     inst.AnimState:PushAnimation("idle", true)
@@ -271,9 +394,10 @@ function ConstructionCannon:Fire(s)
     end
 
     -- 炮弹飞行时间内服务器不做事, 落地时刻再做一次合法性检查并生成建筑
+    -- 注意: 用 job.cancelled 而不是 self.job 判断——队列收尾(Finish)不会取消已在飞行中的最后一炮
     local job = self.job
     inst:DoTaskInTime(CCBP.FLIGHT_TIME, function()
-        if self.job ~= job or self.inst == nil or not self.inst:IsValid() then
+        if job.cancelled or self.inst == nil or not self.inst:IsValid() then
             return
         end
         if self:StepValid(s) and self:SpawnBuilding(s) then
@@ -319,19 +443,23 @@ end
 function ConstructionCannon:BuildingTick()
     local job = self.job
     local waiting = (self.state == "WAITING_MATERIAL")
+    self._avail_cache = {} -- 材料计数缓存: 每 tick 重建(玩家随时可能补料)
 
-    -- 先跳过所有非法位置
-    local guard = 0
-    while job.next <= #job.steps and guard < CCBP.MAX_STEPS_PER_TICK do
-        guard = guard + 1
-        local s = job.steps[job.next]
-        if self:StepValid(s) then
-            break
+    -- 材料够了就先造: 扫描全部未完成步骤
+    --   位置无效(被占/水面) → 跳过; 材料齐 → 立即开炮; 都不齐 → 等待
+    for i, s in ipairs(job.steps) do
+        if job.pending[i] and not self:StepValid(s) then
+            if (job.skip_prints or 0) < 10 then
+                print(string.format("[CCBP] 跳过无效位置: %s @ (%.1f, %.1f)", s.prefab, s.x, s.z))
+                job.skip_prints = (job.skip_prints or 0) + 1
+            end
+            job.pending[i] = nil
+            job.remaining = job.remaining - 1
+            job.skipped = job.skipped + 1
         end
-        job.skipped = job.skipped + 1
-        job.next = job.next + 1
     end
-    if job.next > #job.steps then
+
+    if job.remaining <= 0 then
         self:Finish()
         return
     end
@@ -340,20 +468,30 @@ function ConstructionCannon:BuildingTick()
         return
     end
 
-    local s = job.steps[job.next]
-    if self:HasMaterials(s) then
-        if self:TakeMaterials(s) then
-            self:SetState("BUILDING")
-            self.fire_cd = CCBP.BUILD_INTERVAL
-            self:Fire(s)
-            job.next = job.next + 1
-        else
-            self:SetState("WAITING_MATERIAL")
+    -- 找第一个材料齐备的步骤开炮(不按蓝图顺序)
+    local missing_any = false
+    for i, s in ipairs(job.steps) do
+        if job.pending[i] then
+            if self:HasMaterials(s) and self:TakeMaterials(s) then
+                self:SetState("BUILDING")
+                self.fire_cd = CCBP.BUILD_INTERVAL
+                self:Fire(s)
+                job.pending[i] = nil
+                job.remaining = job.remaining - 1
+                self:UpdateMatsText()
+                return
+            else
+                missing_any = true
+            end
         end
-    elseif not waiting then
+    end
+
+    if missing_any and not waiting then
         self:SetState("WAITING_MATERIAL")
-        local mt = MissingText(self)
-        self:Say(mt ~= "" and ("等待材料: " .. mt) or "等待材料… 请把材料放进大炮货舱或附近箱子")
+        local parts = AggregateMissing(self)
+        local mt = table.concat(parts, ", ")
+        self:Say(mt ~= "" and ("等待材料: " .. mt) or "等待材料… 请把材料放进大炮附近的箱子")
+        self:UpdateMatsText()
     end
 end
 
@@ -361,7 +499,11 @@ function ConstructionCannon:Finish()
     local job = self.job
     self.job = nil
     self:SetState("COMPLETED")
-    self:Say(string.format("施工完成: 成功%d个, 跳过%d个", job.built or 0, job.skipped or 0))
+    self:RefreshBlueprintSlot()
+    -- 完成报告延迟到最后一发炮弹落地之后(报告里才能含最后一栋)
+    self.inst:DoTaskInTime(CCBP.FLIGHT_TIME + 0.3, function()
+        self:Say(string.format("施工完成: 成功%d个, 跳过%d个", job.built or 0, job.skipped or 0))
+    end)
     self.inst:DoTaskInTime(8, function()
         if self.state == "COMPLETED" and self.job == nil then
             self:SetState("IDLE")
@@ -376,9 +518,45 @@ function ConstructionCannon:Enqueue(steps, bpname)
     if steps == nil or #steps <= 0 then
         return false, "没有可施工的结构"
     end
-    self.job = { steps = steps, next = 1, built = 0, skipped = 0, cost_acc = {} }
+    print("[CCBP] 施工队列: " .. tostring(bpname or "蓝图") .. " 共" .. #steps .. "步")
+    self.job = {
+        steps = steps,
+        pending = {},
+        remaining = #steps,
+        built = 0,
+        skipped = 0,
+        cost_acc = {},
+        mats_lines = {},
+    }
+    for i = 1, #steps do
+        self.job.pending[i] = true
+    end
+
+    -- 汇总整单材料需求(展示用, 按 *_item 配方产出数量分摊)
+    local totals = {}
+    for _, s in ipairs(steps) do
+        local recipe, per = ResolveRecipe(s.prefab)
+        if recipe ~= nil then
+            for _, ing in ipairs(recipe.ingredients) do
+                if ing ~= nil and ing.type ~= nil and (ing.amount or 0) > 0 then
+                    totals[ing.type] = (totals[ing.type] or 0) + ing.amount / per
+                end
+            end
+        end
+    end
+    for t, amt in pairs(totals) do
+        local label = STRINGS.NAMES[string.upper(t)] or t
+        self.job.mats_lines[#self.job.mats_lines + 1] = label .. " x" .. tostring(math.ceil(amt - 0.000001))
+    end
+    table.sort(self.job.mats_lines)
+    -- 行数上限(net_string 容量保护)
+    while #self.job.mats_lines > 14 do
+        table.remove(self.job.mats_lines)
+    end
+
     self.fire_cd = 0
     self:SetState("CHECKING")
+    self:UpdateMatsText()
     self:Say("开始施工: " .. tostring(bpname or "蓝图") .. " (" .. #steps .. "个结构)")
     self:StartTicker()
     return true
@@ -386,8 +564,10 @@ end
 
 function ConstructionCannon:Cancel()
     if self.job ~= nil then
+        self.job.cancelled = true -- 中止还在飞行中的炮弹
         self.job = nil
         self:SetState("IDLE")
+        self:UpdateMatsText()
         self:StopTicker()
         self:Say("施工已取消")
     end

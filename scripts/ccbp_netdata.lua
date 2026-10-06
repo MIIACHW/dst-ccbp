@@ -91,13 +91,6 @@ function NetData.SendToast(player, msg)
     end
 end
 
-function NetData.SendStartPlacement(player, id)
-    local rpc = GetClientRPC("StartPlacement")
-    if rpc ~= nil and player ~= nil and player.userid ~= nil then
-        SendModRPCToClient(rpc, player.userid, tostring(id))
-    end
-end
-
 function NetData.SendOpenBrowser(player, cannon_uid, cannon_name)
     local rpc = GetClientRPC("OpenBrowser")
     print("[CCBP] SendOpenBrowser: rpc=" .. tostring(rpc ~= nil) .. " userid=" .. tostring(player ~= nil and player.userid or "nil"))

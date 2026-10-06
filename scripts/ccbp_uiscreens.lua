@@ -1,6 +1,8 @@
 -- 客户端 UI: 蓝图库浏览器 + 施工确认面板 + 顶部提示
+-- 布局遵循原版界面标准: 黑遮罩 FILLSCREEN + 内容根 PROPORTIONAL(等比缩放并居中)
 local CCBP = require "ccbp_config"
 local Screen = require "widgets/screen"
+local Widget = require "widgets/widget"
 local Text = require "widgets/text"
 local Image = require "widgets/image"
 local ImageButton = require "widgets/imagebutton"
@@ -17,11 +19,6 @@ local UI = {
     browser = nil,
     confirm = nil,
 }
-
-local PlacementRef -- 循环依赖由 placement 模块注入
-function UI.SetPlacementRef(p)
-    PlacementRef = p
-end
 
 function UI.Toast(msg)
     local player = ThePlayer
@@ -61,73 +58,92 @@ end)
 
 function Browser:Build()
     self.black = self:AddChild(Image("images/global.xml", "square.tex"))
-    self.black:SetSize(RESOLUTION_X, RESOLUTION_Y)
-    self.black:SetTintColour(0, 0, 0, 0.5)
+    self.black:SetScaleMode(SCALEMODE_FILLSCREEN)
+    self.black:SetHAnchor(ANCHOR_MIDDLE)
+    self.black:SetVAnchor(ANCHOR_MIDDLE)
+    self.black:SetTint(0, 0, 0, 0.5)
 
-    self.panel = self:AddChild(Image("images/global.xml", "square.tex"))
+    -- 内容根: PROPORTIONAL 缩放保证在任意分辨率下居中
+    self.proot = self:AddChild(Widget("root"))
+    self.proot:SetScaleMode(SCALEMODE_PROPORTIONAL)
+    self.proot:SetHAnchor(ANCHOR_MIDDLE)
+    self.proot:SetVAnchor(ANCHOR_MIDDLE)
+
+    self.panel = self.proot:AddChild(Image("images/global.xml", "square.tex"))
     self.panel:SetSize(740, 620)
-    self.panel:SetTintColour(0.12, 0.12, 0.15, 0.97)
+    self.panel:SetTint(0.12, 0.12, 0.15, 0.97)
 
-    self.title = self:AddChild(Text(DEFAULTFONT, 36, "蓝图库"))
+    self.title = self.proot:AddChild(Text(DEFAULTFONT, 36, "蓝图库"))
     self.title:SetPosition(0, 268)
 
-    self.subtitle = self:AddChild(Text(DEFAULTFONT, 20, "加载中…"))
+    self.subtitle = self.proot:AddChild(Text(DEFAULTFONT, 20, "加载中…"))
     self.subtitle:SetPosition(0, 232)
 
     self.rows = {}
     for i = 1, ROWS do
         local y = 184 - (i - 1) * 44
-        local name = self:AddChild(Text(DEFAULTFONT, 22, ""))
+        local name = self.proot:AddChild(Text(DEFAULTFONT, 22, ""))
         name:SetPosition(-120, y)
-        local burn = MakeButton(self, 250, y, "刻录蓝图", function()
+        local burn = MakeButton(self.proot, 250, y, "刻录蓝图", function()
             self:OnBurn(i)
         end, 0.55)
         self.rows[i] = { name = name, burn = burn }
     end
 
-    self.page_prev = MakeButton(self, -290, -248, "上一页", function()
+    self.page_prev = MakeButton(self.proot, -290, -248, "上一页", function()
         if self.page > 0 then
             self.page = self.page - 1
             self:Refresh()
         end
     end, 0.5)
 
-    self.page_next = MakeButton(self, -185, -248, "下一页", function()
+    self.page_next = MakeButton(self.proot, -185, -248, "下一页", function()
         self.page = self.page + 1
         self:Refresh()
     end, 0.5)
 
-    self.reload = MakeButton(self, -80, -248, "重读JSON", function()
+    self.reload = MakeButton(self.proot, -80, -248, "重读JSON", function()
         SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "ReloadStore"))
     end, 0.5)
 
-    self.canceljob = MakeButton(self, 25, -248, "取消施工", function()
+    self.canceljob = MakeButton(self.proot, 25, -248, "取消施工", function()
         print("[CCBP] UI请求取消施工: " .. tostring(self.cannon_uid))
         SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "CancelConstruction"), self.cannon_uid)
     end, 0.5)
 
-    self.close = MakeButton(self, 130, -248, "关闭", function()
+    self.close = MakeButton(self.proot, 130, -248, "关闭", function()
         UI.CloseBrowser()
     end, 0.5)
 
-    self.entry_label = self:AddChild(Text(DEFAULTFONT, 18, "手动读取:"))
-    self.entry_label:SetPosition(-295, -292)
-    self.entry = self:AddChild(TextEdit(DEFAULTFONT, 20, ""))
-    self.entry:SetPosition(-150, -292)
-    if self.entry.SetRegionSize ~= nil then
-        self.entry:SetRegionSize(230, 30)
-    end
+    self.hint = self.proot:AddChild(Text(DEFAULTFONT, 16,
+        "蓝图文件放在游戏目录 unsafedata/ 或本mod目录 blueprints/\n多张蓝图可在 unsafedata/ccbp_index.json 里列文件名"))
+    self.hint:SetPosition(0, -286)
+
+    self.entry_label = self.proot:AddChild(Text(DEFAULTFONT, 18, "手动读取:"))
+    self.entry_label:SetPosition(-295, -320)
+    self.entry = self.proot:AddChild(TextEdit(DEFAULTFONT, 20, ""))
+    self.entry:SetPosition(-150, -320)
     -- 注意: TextEdit 的 OnTextEntered 回调只传字符串
     self.entry.OnTextEntered = function(str)
         self:LoadFile(str)
     end
-    self.load_btn = MakeButton(self, 30, -292, "读取", function()
+    if self.entry.SetRegionSize ~= nil then
+        self.entry:SetRegionSize(230, 30)
+    end
+    self.load_btn = MakeButton(self.proot, 10, -320, "读取", function()
         self:LoadFile(self.entry:GetString())
-    end, 0.5)
+    end, 0.45)
+end
 
-    self.hint = self:AddChild(Text(DEFAULTFONT, 16,
-        "蓝图文件放在游戏目录 unsafedata/ 或本mod目录 blueprints/\n多张蓝图可在 unsafedata/ccbp_index.json 里列文件名"))
-    self.hint:SetPosition(0, -272)
+function Browser:OnControl(control, down)
+    if Screen._base.OnControl(self, control, down) then
+        return true
+    end
+    if down and control == CONTROL_CANCEL then
+        UI.CloseBrowser()
+        return true
+    end
+    return false
 end
 
 function Browser:OnList(list)
@@ -182,17 +198,6 @@ function Browser:OnBurn(i)
     SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "BurnBlueprint"), e.id)
 end
 
-function Browser:OnControl(control, down)
-    if Screen._base.OnControl(self, control, down) then
-        return true
-    end
-    if down and control == CONTROL_CANCEL then
-        UI.CloseBrowser()
-        return true
-    end
-    return false
-end
-
 function Browser:LoadFile(name)
     if type(name) ~= "string" then
         return
@@ -203,51 +208,6 @@ function Browser:LoadFile(name)
         return
     end
     SendModRPCToServer(GetModRPC(CCBP.MOD_NS, "LoadBlueprintFile"), name)
-end
-
--- ==================== 施工确认面板 ====================
-
-local Confirm = Class(Screen, function(self, bp, info)
-    Screen._ctor(self, "CCBP_Confirm")
-    self:Build(bp)
-    self:SetInfo(info)
-end)
-
-function Confirm:Build(bp)
-    self.panel = self:AddChild(Image("images/global.xml", "square.tex"))
-    self.panel:SetSize(560, 280)
-    self.panel:SetTintColour(0.12, 0.12, 0.15, 0.97)
-
-    self.title = self:AddChild(Text(DEFAULTFONT, 30, "确认施工"))
-    self.title:SetPosition(0, 108)
-
-    self.name = self:AddChild(Text(DEFAULTFONT, 22, bp ~= nil and bp.name or "?"))
-    self.name:SetPosition(0, 66)
-
-    self.info = self:AddChild(Text(DEFAULTFONT, 20, ""))
-    self.info:SetPosition(0, 20)
-
-    self.help = self:AddChild(Text(DEFAULTFONT, 17,
-        "WASD 微调位置 (Shift慢速) · Q/E 旋转 · 右键或按钮确认 · ESC 取消"))
-    self.help:SetPosition(0, -34)
-
-    MakeButton(self, -90, -95, "确认施工", function()
-        if PlacementRef ~= nil then
-            PlacementRef.SendConfirm()
-        end
-    end, 0.6)
-
-    MakeButton(self, 90, -95, "取消", function()
-        if PlacementRef ~= nil then
-            PlacementRef.Exit()
-        end
-    end, 0.6)
-end
-
-function Confirm:SetInfo(info)
-    if self.info ~= nil then
-        self.info:SetString(info or "")
-    end
 end
 
 -- ==================== 对外接口 ====================
@@ -274,28 +234,6 @@ function UI.OnList(list)
     print("[CCBP] 客户端收到蓝图列表: " .. tostring(list ~= nil and #list or "nil") .. " 张")
     if UI.browser ~= nil then
         UI.browser:OnList(list)
-    end
-end
-
-function UI.ShowConfirm(bp, info)
-    UI.HideConfirm()
-    UI.confirm = Confirm(bp, info)
-    TheFrontEnd:PushScreen(UI.confirm)
-end
-
-function UI.HideConfirm()
-    if UI.confirm ~= nil then
-        local c = UI.confirm
-        UI.confirm = nil
-        pcall(function()
-            TheFrontEnd:PopScreen(c)
-        end)
-    end
-end
-
-function UI.SetConfirmInfo(info)
-    if UI.confirm ~= nil then
-        UI.confirm:SetInfo(info)
     end
 end
 

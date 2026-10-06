@@ -51,15 +51,15 @@ configuration_options =
     {
         name = "ccbp_matradius",
         label = "取料范围",
-        hover = "大炮自动从附近箱子取材料的半径, 0=只用大炮货舱",
+        hover = "大炮从附近箱子自动取材料的半径(材料全部来自周围容器)",
         options =
         {
-            { description = "仅大炮货舱", data = 0 },
             { description = "小 (6)", data = 6 },
             { description = "标准 (12)", data = 12 },
             { description = "大 (24)", data = 24 },
+            { description = "很大 (48)", data = 48 },
         },
-        default = 6,
+        default = 12,
     },
     {
         name = "ccbp_debug",
